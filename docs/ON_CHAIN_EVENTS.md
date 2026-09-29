@@ -1448,6 +1448,29 @@ reads as `{ version: 0, ledger: 0 }`: it keeps counting until the gate's first
 redefinition, and the next `unlock` replaces it with a record. A contract deployed before
 this change has no `get_unlock` or `get_gate_version`.
 
+### Batch gate reads (`get_status` / `check_many`)
+
+```rust
+pub struct GateStatus {
+    pub gate: Gate,
+    pub passes: bool,   // check(addr, gate.id)
+    pub unlocked: bool, // is_unlocked(addr, gate.id)
+}
+
+pub fn get_status(addr: Address) -> Vec<GateStatus>
+pub fn check_many(addr: Address, ids: Vec<u32>) -> Vec<bool>
+```
+
+`get_status(addr)` returns every gate of `get_gates` (inactive ones included, same order)
+with the two per-address answers, all from one ledger. An inactive gate never `passes`
+and its unlocks don't count, exactly as with the single-gate reads; composite gates are
+evaluated on their whole rule set, and `unlocked` follows the `UnlockRecord` version rule
+above. `check_many(addr, ids)` answers `check` for each id in order (duplicates kept,
+`false` for an unknown or inactive gate). Both read each Reputation track at most once per
+call, however many gates or rules use it, and skip a track no active gate being evaluated
+needs. They are read-only and take no auth. A contract deployed before these views has no
+`get_status` or `check_many`.
+
 ---
 
 ## Shared TypeScript Mirrors
@@ -1470,29 +1493,6 @@ export const EVENTS = {
   // handle, meta, gate, unlocked, streak, rwd_set, rwd_cap, rwd_strk, attester are not yet mirrored
 } as const;
 ```
-
-### Reading view structs (`Attestation`, `Vouch`, `Profile`)
-
-`Vouch` and `Profile` mirror the structs above field for field, every `u64` a
-`bigint` (what `scValToNative` hands back), and ship with `decodeVouch` /
-`decodeProfile`. A named-field `#[contracttype]` struct travels as an
-`ScVal::Map` keyed by field name, which `scValToNative` turns into a plain
-object: `Option<T>` is the value or `null` (`ScVal::Void`), `BytesN<32>` a
-32-byte buffer. The decoders take that object and accept exactly the fields in
-`VOUCH_FIELDS` / `PROFILE_FIELDS`, so a field added, dropped or renamed throws
-instead of reading as `undefined`. `get_vouch` for an id never minted decodes
-to `null`. `Attestation` has no decoder: its `value` (an `i128`) is a `bigint`,
-its `timestamp` a `number` of unix seconds.
-
-`contracts/reputation/testdata/read_views.json` holds real `get_vouch` /
-`get_profile` return values (the XDR of each `ScVal`, hex). The contract test
-`read_view_fixtures_match_the_contract` writes it from real calls and fails
-when it is stale (rerun with `UPDATE_READ_VIEWS=1`);
-`packages/shared/src/read-views.test.ts` decodes it through the mirrors and
-checks their field lists against `contracts/reputation/src/lib.rs`, and
-`apps/web/src/lib/read-views.test.ts` checks that the `@alvinmunk/sdk` views
-the app reads through decode it the same way. A drift on either side fails a
-test.
 
 ---
 

@@ -19,7 +19,7 @@ vi.mock('./contracts', () => ({
 const sdkMock = vi.hoisted(() => ({ checkGate: vi.fn() }));
 vi.mock('./sdk', () => ({ readClient: () => sdkMock }));
 
-import { TRACK, getGates, checkGate, isUnlocked, unlockGate, getStatus } from './gate';
+import { TRACK, getGates, getGateStatus, checkGate, isUnlocked, unlockGate } from './gate';
 import type { Wallet } from './wallet';
 
 describe('gate TRACK constants', () => {
@@ -78,30 +78,30 @@ describe('checkGate', () => {
 
   it('returns true if address passes gate', async () => {
     sdkMock.checkGate.mockResolvedValueOnce(true);
-    const result = await checkGate('GADTR', 1);
+    const result = await checkGate('GADDR', 1);
 
     expect(result).toBe(true);
-    expect(sdkMock.checkGate).toHaveBeenCalledWith('GADTR', 1);
+    expect(sdkMock.checkGate).toHaveBeenCalledWith('GADDR', 1);
     expect(readPublicMock).not.toHaveBeenCalled();
   });
 
   it('returns false if address fails gate', async () => {
     sdkMock.checkGate.mockResolvedValueOnce(false);
-    const result = await checkGate('GADTR', 1);
+    const result = await checkGate('GADDR', 1);
     expect(result).toBe(false);
     expect(sdkMock.checkGate).toHaveBeenCalledTimes(1);
   });
 
   it('returns false if the read fails', async () => {
     sdkMock.checkGate.mockRejectedValueOnce(new Error('fail'));
-    const result = await checkGate('GADTR', 1);
+    const result = await checkGate('GADDR', 1);
     expect(result).toBe(false);
     expect(sdkMock.checkGate).toHaveBeenCalledTimes(1);
   });
 
   it('returns false if gateId is missing', async () => {
     gateIdMock.mockReturnValueOnce('');
-    const result = await checkGate('GADTR', 1);
+    const result = await checkGate('GADDR', 1);
     expect(result).toBe(false);
     expect(sdkMock.checkGate).not.toHaveBeenCalled();
   });
@@ -118,7 +118,7 @@ describe('isUnlocked', () => {
     const result = await isUnlocked('GADDR', 2);
     expect(result).toBe(true);
     expect(readPublicMock).toHaveBeenCalledWith('CGATEID', 'is_unlocked', [
-      { __addr: 'GADTR' },
+      { __addr: 'GADDR' },
       { __u32: 2 },
     ]);
   });
@@ -136,37 +136,36 @@ describe('isUnlocked', () => {
   });
 });
 
-describe('getStatus', () => {
+describe('getGateStatus', () => {
   beforeEach(() => {
     readPublicMock.mockReset();
     gateIdMock.mockReturnValue('CGATEID');
   });
 
-  it('returns every gate with passes and unlocked', async () => {
+  it('reads every gate with passes/unlocked in one get_status call', async () => {
     readPublicMock.mockResolvedValueOnce([
       { gate: { id: 1, track: 0, min: 10n, label: 'Noobs', active: true }, passes: true, unlocked: true },
       { gate: { id: 2, track: 1, min: 50n, label: 'Pros', active: false }, passes: false, unlocked: false },
     ]);
-    const status = await getStatus('GADTR');
-
-    expect(status).toEqual([
+    await expect(getGateStatus('GADDR')).resolves.toEqual([
       { gate: { id: 1, track: 0, min: 10, label: 'Noobs', active: true }, passes: true, unlocked: true },
       { gate: { id: 2, track: 1, min: 50, label: 'Pros', active: false }, passes: false, unlocked: false },
     ]);
+    expect(readPublicMock).toHaveBeenCalledTimes(1);
     expect(readPublicMock).toHaveBeenCalledWith('CGATEID', 'get_status', [{ __addr: 'GADDR' }]);
   });
 
-  it('returns empty array if gateId is missing', async () => {
+  it('returns no gates without a gate contract, and makes no call', async () => {
     gateIdMock.mockReturnValueOnce('');
-    const status = await getStatus('GADTR');
-    expect(status).toEqual([]);
+    await expect(getGateStatus('GADDR')).resolves.toEqual([]);
     expect(readPublicMock).not.toHaveBeenCalled();
   });
 
-  it('returns empty array on error', async () => {
+  it('reads an RPC failure or an empty result as no gates', async () => {
     readPublicMock.mockRejectedValueOnce(new Error('fail'));
-    const status = await getStatus('GADDR');
-    expect(status).toEqual([]);
+    await expect(getGateStatus('GADDR')).resolves.toEqual([]);
+    readPublicMock.mockResolvedValueOnce(undefined);
+    await expect(getGateStatus('GADDR')).resolves.toEqual([]);
   });
 });
 

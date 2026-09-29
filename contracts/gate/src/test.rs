@@ -24,14 +24,12 @@ fn setup_in(env: Env) -> Fixture<'static> {
     let admin = Address::generate(&env);
     let attester = Address::generate(&env);
 
-    let rep_id = env.register(ReputationContract, ());
+    let rep_id = env.register(ReputationContract, (&admin,));
     let rep = ReputationContractClient::new(&env, &rep_id);
-    rep.init(&admin);
     rep.add_attester(&attester);
 
-    let gate_id = env.register(GateContract, ());
+    let gate_id = env.register(GateContract, (&admin, &rep_id));
     let gate = GateContractClient::new(&env, &gate_id);
-    gate.init(&admin, &rep_id);
 
     Fixture {
         env,
@@ -181,9 +179,8 @@ fn non_admin_upgrade_reverts() {
     let env = Env::default();
     let admin = Address::generate(&env);
     let rep = Address::generate(&env);
-    let id = env.register(GateContract, ());
+    let id = env.register(GateContract, (&admin, &rep));
     let client = GateContractClient::new(&env, &id);
-    client.init(&admin, &rep);
     let hash = soroban_sdk::BytesN::from_array(&env, &[1; 32]);
     client.upgrade(&hash);
 }
@@ -395,7 +392,98 @@ fn single_rule_shorthand_stores_no_rule_set() {
     let user = Address::generate(&f.env);
     earn(&f, &user, 19);
     assert!(!f.gate.check(&user, &30u32));
-    earn(&f, &user, 1);
+}
+
+// --- Batch status ---
+
+#[test]
+fn get_status_reports_every_gate() {
+    let f = setup();
+    let user = Address::generate(&f.env);
+    f.gate.create_gate(
+        &1u32,
+        &TRACK_EARNED,
+        &30u64,
+        &String::from_str(&f.env, "Bounty board"),
+    );
+    f.gate.create_gate(
+        &2u32,
+        &TRACK_SOCIAL,
+        &25u64,
+        &String::from_str(&f.env, "Inner circle"),
+    );
+    f.gate.create_gate(
+        &3u32,
+        &TRACK_EARNED,
+        &0u64,
+        &String::from_str(&f.env, "Inactive"),
+    );
+    f.gate.set_gate_active(&3u32, &false);
+
+    earn(&f, &user, 50); // Earned 50, Social 0
+
+    let statuses = f.gate.get_status(&user);
+    assert_eq!(statuses.len(), 3);
+
+    let s1 = statuses.get(0).unwrap();
+    assert_eq!(s1.gate.id, 1);
+    assert!(s1.passes);
+    assert!(!s1.unlocked);
+
+    let s2 = statuses.get(1).unwrap();
+    assert_eq!(s2.gate.id, 2);
+    assert!(!s2.passes);
+    assert!(!s2.unlocked);
+
+    let s3 = statuses.get(2).unwrap();
+    assert_eq!(s3.gate.id, 3);
+    assert!(!s3.passes); // inactive
+    assert!(!s3.unlocked);
+
+    f.gate.unlock(&user, &1u32);
+    let statuses = f.gate.get_status(&user);
+    let s1 = statuses.get(0).unwrap();
+    assert!(s1.passes);
+    assert!(s1.unlocked);
+}
+
+#[test]
+fn get_status_unknown_gate_absent() {
+    let f = setup();
+    let user = Address::generate(&f.env);
+    assert_eq!(f.gate.get_status(&user).len(), 0);
+}
+
+#[test]
+fn check_many_matches_individual_checks() {
+    let f = setup();
+    let user = Address::generate(&f.env);
+    f.gate.create_gate(
+        &1u32,
+        &TRACK_EARNED,
+        &30u64,
+        &String::from_str(&f.env, "a"),
+    );
+    f.gate.create_gate(
+        &2u32,
+        &TRACK_SOCIAL,
+        &25u64,
+        &String::from_str(&f.env, "b"),
+    );
+    f.gate.set_gate_active(&2u32, &false);
+    earn(&f, &user, 50);
+
+    let mut ids = Vec::new(&f.env);
+    ids.push_back(1u32);
+    ids.push_back(2u32);
+    ids.push_back(99u32);
+    let results = f.gate.check_many(&user, &ids);
+    assert_eq!(results.len(), 3);
+    assert!(results.get(0).unwrap());
+    assert!(!results.get(1).unwrap()); // inactive
+    assert!(!results.get(2).unwrap()); // unknown
+}
+ earn(&f, &user, 1);
     assert!(f.gate.check(&user, &30u32));
 }
 
@@ -581,8 +669,10 @@ fn check_reads_each_track_once() {
     env.mock_all_auths();
     let rep_id = env.register(counting_rep::CountingRep, ());
     let rep = counting_rep::CountingRepClient::new(&env, &rep_id);
-    let gate = GateContractClient::new(&env, &env.register(GateContract, ()));
-    gate.init(&Address::generate(&env), &rep_id);
+    let gate = GateContractClient::new(
+        &env,
+        &env.register(GateContract, (&Address::generate(&env), &rep_id)),
+    );
     let mut rules = Vec::new(&env);
     for r in [
         rule(TRACK_SOCIAL, 10),
@@ -945,8 +1035,10 @@ fn counting_setup(
     env.mock_all_auths();
     let rep_id = env.register(counting_rep::CountingRep, ());
     let rep = counting_rep::CountingRepClient::new(env, &rep_id);
-    let gate = GateContractClient::new(env, &env.register(GateContract, ()));
-    gate.init(&Address::generate(env), &rep_id);
+    let gate = GateContractClient::new(
+        env,
+        &env.register(GateContract, (&Address::generate(env), &rep_id)),
+    );
     (gate, rep)
 }
 
@@ -1155,4 +1247,27 @@ fn upgrading_serves_the_batch_views() {
             .collect::<std::vec::Vec<bool>>(),
         [true]
     );
+}
+
+/// #127: the release build is set up by its constructor, inside the deploy — registering it
+/// takes the constructor's arguments, it has no `init` left for anyone to call afterwards,
+/// and `upgrade` asks the constructor's admin to sign.
+#[test]
+fn the_release_build_is_set_up_by_its_constructor() {
+    use soroban_sdk::IntoVal as _;
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = soroban_sdk::Address::generate(&env);
+    let rep = soroban_sdk::Address::generate(&env);
+    let id = env.register(GATE_WASM, (&admin, &rep));
+    let init = soroban_sdk::Symbol::new(&env, "init");
+    let impostor = soroban_sdk::Address::generate(&env);
+    let call = soroban_sdk::vec![&env, impostor.into_val(&env)];
+    assert!(env
+        .try_invoke_contract::<(), soroban_sdk::Error>(&id, &init, call)
+        .is_err());
+
+    let hash = env.deployer().upload_contract_wasm(GATE_WASM);
+    GateContractClient::new(&env, &id).upgrade(&hash);
+    assert_eq!(env.auths()[0].0, admin);
 }

@@ -4,7 +4,6 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Lock, Check } from 'lucide-react';
 import { getWallet } from '@/lib/wallet';
 import { getGateStatus, unlockGate, TRACK, type GateStatus } from '@/lib/gate';
-import { getScores } from '@/lib/reputation';
 import { Frame } from '@/components/fx/frame';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -27,11 +26,8 @@ export function Unlockables({ address }: { address: string }) {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const [s, status] = await Promise.all([
-      getScores(address).catch(() => ({ social: 0, earned: 0 })),
-      getGateStatus(address),
-    ]);
-    setScores(s);
+    const status = await getGateStatus(address);
+    setScores({ social: status.social, earned: status.earned });
     setRows(status.filter((r) => r.gate.active));
   }, [address]);
 

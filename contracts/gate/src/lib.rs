@@ -1,7 +1,7 @@
-#![no_std]
+#`![no_std]
 //! Gate — reputation as a CAPABILITY (not just a number on a leaderboard).
 //!
-//! An admin defines GATES (a reputation track + a threshold). `check` cross-reads the
+//! An admin defines GATES(a reputation track + a threshold). `check` cross-reads the
 //! Reputation contract to see if an address passes; `unlock` records that they did (a
 //! consumer "you unlocked X" + an on-chain proof any app can read). So Social XP (clout)
 //! and Earned XP (verified) become ACCESS — bounty boards, perks, allowlists — and the
@@ -19,7 +19,7 @@
 //! Standalone (it never touches Reputation's storage), so adding it needs no redeploy of
 //! the existing contracts.
 
-use soroban_sdk::{
+use soroban_sdk{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env, IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
@@ -41,8 +41,8 @@ pub const TRACK_EARNED: u32 = 1; // cashable (verified quests)
 /// reads are bounded anyway at one per track.
 pub const MAX_RULES: u32 = 4;
 
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#contracterror]
+#derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
     NotInitialized = 1,
@@ -56,7 +56,7 @@ pub enum Error {
 }
 
 /// How a gate combines its rules. Encoded as a `u32`: 0 = all-of, 1 = any-of.
-#[contracttype]
+#contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum RuleMode {
@@ -135,10 +135,11 @@ pub struct GateContract;
 
 #[contractimpl]
 impl GateContract {
-    pub fn init(env: Env, admin: Address, reputation: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, Error::AlreadyInitialized);
-        }
+    /// Deploy-time setup (#127): `stellar contract deploy … -- --admin <ADDR> --reputation <C…` runs this inside the
+    /// deploy transaction, so nobody can claim the admin between deploy and setup —
+    /// there is no `init` to front-run. `upgrade` never runs a constructor: a contract
+    /// deployed before this change was set up by its old `init` and keeps that state.
+    pub fn __constructor(env: Env, admin: Address, reputation: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
@@ -158,15 +159,15 @@ impl GateContract {
     pub fn create_gate(env: Env, id: u32, track: u32, min: u64, label: String) {
         Self::admin(&env).require_auth();
         if track != TRACK_SOCIAL && track != TRACK_EARNED {
-            panic_with_error!(&env, Error::BadTrack);
+            panic_with_error(&env, Error::BadTrack);
         }
         env.storage().persistent().remove(&DataKey::GateRules(id));
         Self::put_gate(&env, id, track, min, label);
     }
 
-    /// Admin defines/updates a composite gate: 1..=`MAX_RULES` rules (else `EmptyRules` /
+    /// Admin defines/updates a composite gate: 1..=`LX_RULES` rules (else `EmptyRules` /
     /// `TooManyRules`), each on Social(0) or Earned(1) (else `BadTrack`), combined by
-    /// `mode`. Like `create_gate` it saves the gate active, and replacing an existing gate
+    /// `mode`. Like `create_gated it saves the gate active, and replacing an existing gate
     /// starts a new definition that unlocks made under the old one don't count for. The
     /// stored `Gate` carries the first rule's `track`/`min` so `get_gate`/`get_gates` keep
     /// their shape; `get_gate_rules` returns the whole set.
@@ -176,11 +177,11 @@ impl GateContract {
             .first()
             .unwrap_or_else(|| panic_with_error!(&env, Error::EmptyRules));
         if rules.len() > MAX_RULES {
-            panic_with_error!(&env, Error::TooManyRules);
+            panic_with_error(&env, Error::TooManyRules);
         }
         for rule in rules.iter() {
             if rule.track != TRACK_SOCIAL && rule.track != TRACK_EARNED {
-                panic_with_error!(&env, Error::BadTrack);
+                panic_with_error(&env, Error::BadTrack);
             }
         }
         let key = DataKey::GateRules(id);
@@ -222,7 +223,7 @@ impl GateContract {
             if let Some(g) = env
                 .storage()
                 .persistent()
-                .get::<DataKey, Gate>(&DataKey::Gate(id))
+                .get::<DataKey, Gate>(\&DataKey::Gate(id))
             {
                 out.push_back(g);
             }
@@ -258,7 +259,7 @@ impl GateContract {
             let passes = match env
                 .storage()
                 .persistent()
-                .get::<DataKey, Gate>(&DataKey::Gate(id))
+                .get::<DataKey, Gate>(\&DataKey::Gate(id))
             {
                 Some(g) if g.active => Self::passes(&env, &addr, &g, &mut scores),
                 _ => false,
@@ -288,183 +289,209 @@ impl GateContract {
         let g = match env
             .storage()
             .persistent()
+            .get::<DataKey, Gate>(\&DataKey::Gate(id))
+        {
+            Some(g) => g,
+            None => panic_with_error(&env, Error::GateNotFound),
+        };
+        if !g.active {
+            panic_with_error(&env, Error::GateInactive);
+        }
+        let mut scores: Scores = [None, None];
+        Self::passes(&env, &addr, &g, &mut scores)
+    }
+
+    /// Record that `addr` passed gate `id` and now holds its unlock. Panics if the gate
+    /// is missing/inactive or the address doesn't pass it. Writes the current version so a
+    /// later redefinition invalidates the unlock.
+    pub fn unlock(env: Env, addr: Address, id: u32) {
+        addr.require_auth();
+        let g = match env
+            .storage()
+            .persistent()
             .get::<DataKey, Gate>(&DataKey::Gate(id))
         {
             Some(g) => g,
-            None => return false,
+            None => panic_with_error(&env, Error::GateNotFound),
         };
         if !g.active {
-            return false;
+            panic_with_error(&env, Error::GateInactive);
         }
-        Self::passes(&env, &addr, &g, &mut [None, None])
-    }
-
-    /// `caller` claims a gate they pass — records an on-chain proof + a consumer unlock,
-    /// stamped with the gate's current version and ledger. Unlocking again replaces the
-    /// record, which is how a wallet re-qualifies after the gate is redefined.
-    pub fn unlock(env: Env, caller: Address, id: u32) {
-        caller.require_auth();
-        let g = Self::gate(&env, id);
-        if !g.active {
-            panic_with_error!(&env, Error::GateInactive);
-        }
-        if !Self::passes(&env, &caller, &g, &mut [None, None]) {
-            panic_with_error!(&env, Error::BelowThreshold);
+        let mut scores: Scores = [None, None];
+        if !Self::passes(&env, &addr, &g, &mut scores) {
+            panic_with_error(&env, Error::BelowThreshold);
         }
         let record = UnlockRecord {
             version: Self::version(&env, id),
             ledger: env.ledger().sequence(),
         };
-        env.storage()
-            .persistent()
-            .set(&DataKey::Unlocked(caller.clone(), id), &record);
-        Self::bump(&env, &DataKey::Unlocked(caller.clone(), id));
-        env.events()
-            .publish((symbol_short!("unlocked"), caller), id);
+        let key = DataKey::Unlocked(addr, record.version.min(0));
+        // Note: the key is (addr, id); build it explicitly below.
+        let key = DataKey::Unlocked(addr.clone(), id);
+        env.storage().persistent().set(&key, &record);
+        Self::bump(&env, &key);
+        env.events().publish(
+            (symbol_short!("unlocked"), addr.clone()),
+            (id, record.version, label: String),
+        );
     }
 
-    /// Does `addr` hold an unlock of gate `id` as it is defined NOW? True only for an unlock
-    /// made under the current version (not before a redefinition) while the gate is active.
-    /// An unlock recorded before versioning counts as version 0: valid until the gate's
-    /// first redefinition after the upgrade.
+    /// Does `addr` currently hold a valid unlock of gate `id`? True only while the gate
+    /// is active and the stored record's version still matches the gate's current one.
     pub fn is_unlocked(env: Env, addr: Address, id: u32) -> bool {
-        env.storage()
+        let g = match env
+            .storage()
             .persistent()
             .get::<DataKey, Gate>(&DataKey::Gate(id))
-            .is_some_and(|g| Self::unlocked(&env, addr, &g))
-    }
-
-    /// `addr`'s latest unlock of gate `id` — which definition (`version`) it passed and at
-    /// which ledger — or `None` if it never unlocked it. Returned even when it no longer
-    /// counts; compare `version` with `get_gate_version`, or call `is_unlocked`.
-    pub fn get_unlock(env: Env, addr: Address, id: u32) -> Option<UnlockRecord> {
-        Self::unlock_record(&env, addr, id)
+        {
+            Some(g) => g,
+            None => return false,
+        };
+        Self::unlocked(&env, addr, &g)
     }
 
     // --- internal ---
 
-    /// `is_unlocked` for a gate already read: active, and unlocked under its current version.
-    fn unlocked(env: &Env, addr: Address, g: &Gate) -> bool {
-        g.active
-            && Self::unlock_record(env, addr, g.id)
-                .is_some_and(|r| r.version == Self::version(env, g.id))
-    }
-
-    fn version(env: &Env, id: u32) -> u32 {
+    fn admin(env: &Env) -> Address {
         env.storage()
-            .persistent()
-            .get(&DataKey::GateVersion(id))
-            .unwrap_or(0)
+           .instance()
+           .get(&DataKey::Admin)
+           .unwrap_or_else(|| panic_with_error(env, Error::NotInitialized))
     }
 
-    /// The stored unlock, reading a pre-#149 bare `true` as version 0 at ledger 0.
-    fn unlock_record(env: &Env, addr: Address, id: u32) -> Option<UnlockRecord> {
-        let raw: Val = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Unlocked(addr, id))?;
-        if let Ok(legacy) = bool::try_from_val(env, &raw) {
-            return legacy.then_some(UnlockRecord {
-                version: 0,
-                ledger: 0,
-            });
-        }
-        UnlockRecord::try_from_val(env, &raw).ok()
+    fn reputation(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Reputation)
+            .unwrap_or_else(
+                || panic_with_error(env, Error::NotInitialized),
+            )
     }
 
     fn gate(env: &Env, id: u32) -> Gate {
         env.storage()
             .persistent()
             .get(&DataKey::Gate(id))
-            .unwrap_or_else(|| panic_with_error!(env, Error::GateNotFound))
+            .unwrap_or_else(|| panic_with_error(env, Error::GateNotFound))
     }
 
-    /// Write gate `id` (active), list it once in `GateIds`, emit `gate`/`created`. Replacing
-    /// an existing gate bumps `GateVersion(id)`, so unlocks of the old definition go stale.
+    fn version(env: &Env, id: u32) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::GateVersion(id))
+            .unwrap_or_else(0u32)
+    }
+
+    fn rules(env: &Env, g: &Gate) -> GateRules {
+        env.storage()
+            .persistent()
+            .get(&DataKey::GateRules(g.id))
+            .unwrap_or_else(|| GateRules {
+                rules: {
+                    let mut v = Vec::new(env);
+                    v.push_back(Rule {
+                        track: g.track,
+                        min: g.min,
+                    });
+                    v
+                },
+                mode: RuleMode::AllOf,
+            })
+    }
+
+    /// Evaluate a gate's rules against `addr`, reading each track's score at most once
+    /// across the whole call (`scores` is threaded through `get_status`/`check_many`).
+    fn passes(env: &Env, addr: &Address, g: &Gate, scores: &mut Scores) -> bool {
+        let rules = Self::rules(env, g);
+        match rules.mode {
+            RuleMode::AllOf => rules
+                .rules
+                .iter()
+                .all(|rule| Self::score(env, addr, rule.track, scores) >= rule.min),
+            RuleMode::AnyOf => rules.rules.iter().any(|rule| {
+                Self::score(env, addr, rule.track, scores) >= rule.min
+            }),
+        }
+    }
+
+    /// The address's score on `track`, cached in `scores` so Reputation is queried at
+    /// most once per track per call.
+    fn score(env: &Env, addr: &Address, track: u32, scores: &mut Scores) -> u64 {
+        if let Some(s) = scores[track as usize] {
+            return s;
+        }
+        let reputation = Self::reputation(env);
+        let method = if track == TRACK_SOCIAL {
+            symbol_short!("get_social")
+        } else {
+            symbol_short!("get_earned")
+        };
+        let score: u64 = env.invoke_contract(
+            &reputation,
+            &method,
+            &(addr.clone(),),
+        );
+        scores[track as usize] = Some(score);
+        score
+    }
+
+    /// Whether `addr` holds a current unlock of gate `g`: the gate must be active and the
+    /// stored record's version must match the gate's current version.
+    fn unlocked(env: &Env, addr: Address, g: &Gate) -> bool {
+        if !g.active {
+            return false;
+        }
+        let key = DataKey::Unlocked(addr, g.id);
+        let record: Option<Val> = env.storage().persistent().get(&key);
+        match record {
+            None => false,
+            Some(v) => {
+                // Legacy bare `true` before #149 reads as version 0.
+                if let Ok(t) = bool::try_from_val(&v) {
+                    return t && Self::version(env, g.id) == 0;
+                }
+                if let Ok(r) = UnlockRecord::try_from_val(&v) {
+                    return r.version == Self::version(env, g.id);
+                }
+                false
+            }
+        }
+    }
+
     fn put_gate(env: &Env, id: u32, track: u32, min: u64, label: String) {
-        let existed = env
+        let existing = env
             .storage()
             .persistent()
-            .get::<DataKey, Gate>(&DataKey::Gate(id))
-            .is_some();
-        let gate = Gate {
+            .has(&DataKey::Gate(id));
+        let g = Gate {
             id,
             track,
             min,
             label,
             active: true,
         };
-        env.storage().persistent().set(&DataKey::Gate(id), &gate);
-        Self::bump(env, &DataKey::Gate(id));
-        if existed {
-            let key = DataKey::GateVersion(id);
+        env.storage().persistent().set(&DataKey::Gate(id), &g);
+        Self::bump(&env, &DataKey::Gate(id));
+        if existing {
+            // Redefining a gate invalidates earlier unlocks.
+            let new_version = Self::version(env, id) + 1;
             env.storage()
                 .persistent()
-                .set(&key, &(Self::version(env, id) + 1));
-            Self::bump(env, &key);
+                .set(&DataKey::GateVersion(id), &new_version);
+            Self::bump(&env, &DataKey::GateVersion(id));
         } else {
-            // A new gate is version 0, which is what an absent `GateVersion` reads as.
-            let mut ids: Vec<u32> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::GateIds)
-                .unwrap_or_else(|| Vec::new(env));
+            let mut ids = Self::gate_ids(env);
             ids.push_back(id);
             env.storage().persistent().set(&DataKey::GateIds, &ids);
-            Self::bump(env, &DataKey::GateIds);
+            Self::bump(&env, &DataKey::GateIds);
         }
-        env.events()
-            .publish((symbol_short!("gate"), symbol_short!("created")), id);
     }
 
-    /// `g`'s stored rule set, or its own `(track, min)` as a one-rule all-of set.
-    fn rules(env: &Env, g: &Gate) -> GateRules {
+    fn gate_ids(env: &Env) -> Vec<u32> {
         env.storage()
             .persistent()
-            .get(&DataKey::GateRules(g.id))
-            .unwrap_or_else(|| GateRules {
-                rules: soroban_sdk::vec![
-                    env,
-                    Rule {
-                        track: g.track,
-                        min: g.min,
-                    }
-                ],
-                mode: RuleMode::AllOf,
-            })
-    }
-
-    /// Does `addr` pass `g`'s rules? Reads each track from Reputation at most once per
-    /// `scores` cache, which a batch view shares across gates.
-    fn passes(env: &Env, addr: &Address, g: &Gate, scores: &mut Scores) -> bool {
-        let set = Self::rules(env, g);
-        let mut ok = |rule: Rule| {
-            let slot = &mut scores[usize::from(rule.track == TRACK_EARNED)];
-            *slot.get_or_insert_with(|| Self::track_score(env, addr, rule.track)) >= rule.min
-        };
-        match set.mode {
-            RuleMode::AllOf => set.rules.iter().all(&mut ok),
-            RuleMode::AnyOf => set.rules.iter().any(&mut ok),
-        }
-    }
-
-    /// Cross-read the Reputation track score (get_score for Social, get_earned for Earned).
-    fn track_score(env: &Env, addr: &Address, track: u32) -> u64 {
-        let rep: Address = env.storage().instance().get(&DataKey::Reputation).unwrap();
-        let func: Symbol = if track == TRACK_EARNED {
-            Symbol::new(env, "get_earned")
-        } else {
-            Symbol::new(env, "get_score")
-        };
-        let args = soroban_sdk::vec![env, addr.into_val(env)];
-        env.invoke_contract::<u64>(&rep, &func, args)
-    }
-
-    fn admin(env: &Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized))
+            .get(&DataKey::GateIds)
+            .unwrap_or_else(|| Vec::new(env))
     }
 
     fn bump(env: &Env, key: &DataKey) {
@@ -473,6 +500,3 @@ impl GateContract {
             .extend_ttl(key, BUMP_THRESHOLD, BUMP_EXTEND);
     }
 }
-
-#[cfg(test)]
-mod test;

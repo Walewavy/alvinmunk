@@ -47,6 +47,20 @@ export async function readGates(): Promise<Gate[]> {
 }
 
 /**
+ * Batch check — does `address` pass each gate in `ids`? One simulation (`check_many`),
+ * which reads reputation at most once per track. Forgiving: no gate contract or an RPC
+ * failure reads as all-false.
+ */
+export async function checkMany(address: string, ids: number[]): Promise<boolean[]> {
+  if (!gateId()) return ids.map(() => false);
+  const raw = await readPublic<boolean[]>(gateId(), 'check_many', [
+    args.addr(address),
+    args.vecU32(ids),
+  ]).catch(() => []);
+  return (raw ?? []).map(Boolean);
+}
+
+/**
  * Every gate with `address`'s pass / unlock state in ONE simulation (`get_status`), which
  * reads reputation at most once per track. Forgiving like `getGates`: no gate contract or
  * an RPC failure reads as no gates, so the perks panel hides instead of breaking.

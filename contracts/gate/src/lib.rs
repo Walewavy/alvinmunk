@@ -99,6 +99,16 @@ pub struct Gate {
     pub active: bool,
 }
 
+/// Batch view of one gate for one address: the gate itself plus whether `addr` passes it
+/// and whether `addr` has already unlocked it. Returned by `get_status`.
+#[contracttype]
+#[derive(Clone)]
+pub struct GateStatus {
+    pub gate: Gate,
+    pub passes: bool,
+    pub unlocked: bool,
+}
+
 #[contract]
 pub struct GateContract;
 
@@ -189,6 +199,58 @@ impl GateContract {
             {
                 out.push_back(g);
             }
+        }
+        out
+    }
+
+    /// Batch read — every gate with `passes` and `unlocked` for `addr` in one call.
+    /// Reputation is read at most once per track for the whole call, so a screen that
+    /// gates N features costs one simulation with consistent state from a single ledger.
+    pub fn get_status(env: Env, addr: Address) -> Vec<GateStatus> {
+        let ids: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GateIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut scores: [Option<u64>; 2] = [None, None]; // [Social, Earned]
+        let mut out = Vec::new(&env);
+        for id in ids.iter() {
+            if let Some(g) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Gate>(&DataKey::Gate(id))
+            {
+                let passes = g.active && Self::passes_cached(&env, &addr, &g, &mut scores);
+                let unlocked = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Unlocked(addr.clone(), id))
+                    .unwrap_or(false);
+                out.push_back(GateStatus {
+                    gate: g,
+                    passes,
+                    unlocked,
+                });
+            }
+        }
+        out
+    }
+
+    /// Batch `check` — does `addr` pass each of `ids`? Reputation is read at most once
+    /// per track for the whole call. Unknown or inactive gates report `false`.
+    pub fn check_many(env: Env, addr: Address, ids: Vec<u32>) -> Vec<bool> {
+        let mut scores: [Option<u64>; 2] = [None, None]; // [Social, Earned]
+        let mut out = Vec::new(&env);
+        for id in ids.iter() {
+            let passes = match env
+                .storage()
+                .persistent()
+                .get::<DataKey, Gate>(&DataKey::Gate(id))
+            {
+                Some(g) if g.active => Self::passes_cached(&env, &addr, &g, &mut scores),
+                _ => false,
+            };
+            out.push_back(passes);
         }
         out
     }
@@ -303,6 +365,25 @@ impl GateContract {
     fn passes(env: &Env, addr: &Address, g: &Gate) -> bool {
         let set = Self::rules(env, g);
         let mut scores: [Option<u64>; 2] = [None, None]; // [Social, Earned]
+        let mut ok = |rule: Rule| {
+            let slot = &mut scores[usize::from(rule.track == TRACK_EARNED)];
+            *slot.get_or_insert_with(|| Self::track_score(env, addr, rule.track)) >= rule.min
+        };
+        match set.mode {
+            RuleMode::AllOf => set.rules.iter().all(&mut ok),
+            RuleMode::AnyOf => set.rules.iter().any(&mut ok),
+        }
+    }
+
+    /// Like `passes`, but reuses a caller-owned `scores` cache so a batch call reads each
+    /// track from Reputation at most once across every gate it evaluates.
+    fn passes_cached(
+        env: &Env,
+        addr: &Address,
+        g: &Gate,
+        scores: &mut [Option<u64>; 2],
+    ) -> bool {
+        let set = Self::rules(env, g);
         let mut ok = |rule: Rule| {
             let slot = &mut scores[usize::from(rule.track == TRACK_EARNED)];
             *slot.get_or_insert_with(|| Self::track_score(env, addr, rule.track)) >= rule.min

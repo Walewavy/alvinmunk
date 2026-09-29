@@ -305,6 +305,9 @@
   "activity.page.leaderboard.title": "See the leaderboard",
   "activity.page.leaderboard.body": "The most-connected constellations, ranked.",
 
+  "readOnly.stamp": "{network} · READ-ONLY",
+  "readOnly.body": "Archived {network} data. Vouching, tipping and connecting a wallet are off on this view.",
+
   "leaderboard.eyebrow": "// the_night_sky",
   "leaderboard.title": "The most-connected",
   "leaderboard.syncDelayed": "sync delayed",
@@ -321,6 +324,7 @@
   "leaderboard.flaggedTitle": "reciprocal vouch pair — possible ring",
   "leaderboard.you": "you",
   "leaderboard.share": "The most-connected on alvinmunk 🌌 — collect people, not points.",
+  "leaderboard.rowLabel": "{name}, rank {rank}, {score} Social XP",
 
   "howItWorks.meta.title": "How it works",
   "howItWorks.meta.desc": "The vouch loop, the two-track model, and our honest anti-sybil design.",
@@ -509,5 +513,20 @@
   "handleTransfer.submitting": "Moving…",
   "handleTransfer.done": "@{handle} now belongs to this wallet.",
   "handleTransfer.error.noHandle": "The in-app wallet no longer holds a handle — there's nothing to move.",
-  "handleTransfer.error.targetHasHandle": "This wallet already holds a handle — the move needs a wallet without one."
+  "handleTransfer.error.targetHasHandle": "This wallet already holds a handle — the move needs a wallet without one.",
+
+  "moneyFlowConfirm.tipTitle": "Confirm tip",
+  "moneyFlowConfirm.claimTitle": "Confirm claim",
+  "moneyFlowConfirm.tipSubtitle": "You're about to send real USDC on mainnet.",
+  "moneyFlowConfirm.claimSubtitle": "You're about to claim real USDC on mainnet.",
+  "moneyFlowConfirm.to": "To",
+  "moneyFlowConfirm.claimTo": "Paid to your wallet",
+  "moneyFlowConfirm.noHandle": "No @handle — check the address",
+  "moneyFlowConfirm.realMoneyWarning": "This is real money and can't be reversed.",
+  "moneyFlowConfirm.firstTipCheckbox": "I understand this is real money and can't be reversed.",
+  "moneyFlowConfirm.sendingIn": "Sending in {seconds}s — undo to cancel.",
+  "moneyFlowConfirm.undo": "Undo",
+  "moneyFlowConfirm.cancel": "Cancel",
+  "moneyFlowConfirm.confirmTip": "Confirm tip",
+  "moneyFlowConfirm.confirmClaim": "Confirm claim"
 }

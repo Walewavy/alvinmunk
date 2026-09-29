@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { xdr, Address, StrKey } from '@stellar/stellar-sdk';
+import type { ReadNetwork } from './read-network';
 
 const { getLatestLedgerMock, getEventsMock } = vi.hoisted(() => ({
   getLatestLedgerMock: vi.fn(),
@@ -12,11 +13,13 @@ vi.mock('./stellar', () => ({
 }));
 
 import {
+  clearEventCache,
   decodeScVal,
   fetchReputationEvents,
   fetchTipEvents,
   fetchTipsSent,
   EVENT_LEDGER_WINDOW,
+  EVENT_WINDOW_TTL_MS,
   MAX_PAGES,
   PAGE_SIZE,
 } from './events';
@@ -231,8 +234,13 @@ describe('contract event reads', () => {
   const sym = (v: string) => xdr.ScVal.scvSymbol(v).toXDR('base64');
 
   beforeEach(() => {
+    clearEventCache();
     getLatestLedgerMock.mockReset().mockResolvedValue({ sequence: 20_000 });
     getEventsMock.mockReset().mockResolvedValue({ events: [] });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('scans the reputation window with the 2-segment wildcard', async () => {
@@ -245,10 +253,94 @@ describe('contract event reads', () => {
     expect(getEventsMock).toHaveBeenCalledTimes(1); // a quiet window is still one request
   });
 
-  it('shares one scan between concurrent callers, and re-reads once it settles', async () => {
-    await Promise.all([fetchReputationEvents(), fetchReputationEvents(), fetchReputationEvents()]);
+  it("scans the override network's reputation contract on its own RPC, never the deployment's (#290)", async () => {
+    const testnetServer = {
+      getLatestLedger: vi.fn().mockResolvedValue({ sequence: 50_000 }),
+      getEvents: vi.fn().mockResolvedValue({ events: [] }),
+    };
+    const net = {
+      network: 'testnet',
+      contracts: { reputation: 'CTESTREP', registry: 'CTESTREG' },
+      server: testnetServer,
+    } as unknown as ReadNetwork;
+    await Promise.all([fetchReputationEvents({ net }), fetchReputationEvents()]);
+    expect(testnetServer.getEvents).toHaveBeenCalledWith({
+      startLedger: 41_000,
+      filters: [{ type: 'contract', contractIds: ['CTESTREP'], topics: [['*', '*']] }],
+      limit: 1000,
+    });
+    // The deployment's scan ran on its own, not shared with the override's.
     expect(getEventsMock).toHaveBeenCalledTimes(1);
+    expect(getEventsMock.mock.calls[0][0].filters[0].contractIds).toEqual(['CREP']);
+    // Each window is reused within the TTL from its own network's cache.
+    await Promise.all([fetchReputationEvents({ net }), fetchReputationEvents()]);
+    expect(testnetServer.getEvents).toHaveBeenCalledTimes(1);
+    expect(getEventsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keys the shared window by network, even for one contract id on both', async () => {
+    const otherServer = {
+      getLatestLedger: vi.fn().mockResolvedValue({ sequence: 50_000 }),
+      getEvents: vi.fn().mockResolvedValue({ events: [] }),
+    };
+    const net = { network: 'testnet', contracts: { reputation: 'CREP' }, server: otherServer } as unknown as ReadNetwork;
     await fetchReputationEvents();
+    await fetchReputationEvents({ net }); // within the TTL of the deployment's window
+    expect(otherServer.getEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one scan between concurrent callers', async () => {
+    const [a, b, c] = await Promise.all([fetchReputationEvents(), fetchReputationEvents(), fetchReputationEvents()]);
+    expect(getEventsMock).toHaveBeenCalledTimes(1);
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+  });
+
+  it('reuses a settled window for callers that mount later, until the TTL passes', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const first = await fetchReputationEvents(); // the feed mounts
+    now.mockReturnValue(1_000_000 + EVENT_WINDOW_TTL_MS - 1);
+    expect(await fetchReputationEvents()).toBe(first); // the 3D hero, seconds later
+    expect(getLatestLedgerMock).toHaveBeenCalledTimes(1);
+    expect(getEventsMock).toHaveBeenCalledTimes(1);
+
+    now.mockReturnValue(1_000_000 + EVENT_WINDOW_TTL_MS);
+    await fetchReputationEvents();
+    expect(getEventsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one scan between plain and throwOnError callers', async () => {
+    await Promise.all([fetchReputationEvents(), fetchReputationEvents({ throwOnError: true })]);
+    expect(getEventsMock).toHaveBeenCalledTimes(1);
+    await fetchReputationEvents({ throwOnError: true });
+    expect(getEventsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('scans again for maxAgeMs 0, and that scan refreshes the window for everyone', async () => {
+    await fetchReputationEvents();
+    const fresh = await fetchReputationEvents({ maxAgeMs: 0 });
+    expect(getEventsMock).toHaveBeenCalledTimes(2);
+    expect(await fetchReputationEvents()).toBe(fresh);
+    expect(getEventsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('never keeps a failed scan: the next caller reads again', async () => {
+    getEventsMock.mockRejectedValueOnce(new Error('429'));
+    await expect(fetchReputationEvents()).resolves.toEqual([]);
+    await expect(fetchReputationEvents({ throwOnError: true })).resolves.toEqual([]);
+    expect(getEventsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the reputation and tip windows apart, each read once', async () => {
+    await Promise.all([fetchReputationEvents(), fetchTipEvents()]);
+    await Promise.all([fetchReputationEvents(), fetchTipEvents()]);
+    expect(getEventsMock.mock.calls.map((c) => c[0].filters[0].contractIds)).toEqual([['CREP'], ['CRWD']]);
+  });
+
+  it("does not cache one sender's tips (badges read them once, on demand)", async () => {
+    const from = StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 1));
+    await fetchTipsSent(from);
+    await fetchTipsSent(from);
     expect(getEventsMock).toHaveBeenCalledTimes(2);
   });
 
@@ -428,7 +520,7 @@ describe('contract event reads', () => {
       expect(c).toBe(a);
       expect(indexes(a)).toEqual(range(2 * PAGE_SIZE + 1));
 
-      await fetchReputationEvents(); // settled scans are not cached
+      await fetchReputationEvents({ maxAgeMs: 0 }); // a fresh read scans all three pages again
       expect(getEventsMock).toHaveBeenCalledTimes(6);
     });
   });
